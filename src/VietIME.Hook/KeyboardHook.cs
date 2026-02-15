@@ -274,7 +274,8 @@ public class KeyboardHook : IDisposable
                     };
                 }
                 NativeMethods.SendInput((uint)bsInputs.Length, bsInputs, Marshal.SizeOf<NativeMethods.INPUT>());
-                Thread.Sleep(10);
+                // Giảm delay từ 10ms xuống 3ms - tối ưu cho Warp terminal
+                Thread.Sleep(3);
             }
 
             if (text.Length == 0) return;
@@ -392,36 +393,41 @@ public class KeyboardHook : IDisposable
             };
             NativeMethods.SendInput(4, pasteInputs, Marshal.SizeOf<NativeMethods.INPUT>());
 
-            // 5. Chờ app paste xong rồi restore clipboard
-            Thread.Sleep(50);
-
-            // 6. Restore clipboard cũ
-            if (NativeMethods.OpenClipboard(IntPtr.Zero))
+            // 5. Restore clipboard cũ - ASYNC để không block gõ phím (giảm từ 50ms xuống 0ms)
+            if (oldClipboard != null)
             {
-                try
+                var clipboardToRestore = oldClipboard;
+                Task.Delay(30).ContinueWith(_ =>
                 {
-                    NativeMethods.EmptyClipboard();
-                    if (oldClipboard != null)
+                    try
                     {
-                        var bytes = (oldClipboard.Length + 1) * 2;
-                        var hGlobal = NativeMethods.GlobalAlloc(NativeMethods.GMEM_MOVEABLE, (UIntPtr)bytes);
-                        if (hGlobal != IntPtr.Zero)
+                        if (NativeMethods.OpenClipboard(IntPtr.Zero))
                         {
-                            var pGlobal = NativeMethods.GlobalLock(hGlobal);
-                            if (pGlobal != IntPtr.Zero)
+                            try
                             {
-                                Marshal.Copy(oldClipboard.ToCharArray(), 0, pGlobal, oldClipboard.Length);
-                                Marshal.WriteInt16(pGlobal, oldClipboard.Length * 2, 0);
-                                NativeMethods.GlobalUnlock(hGlobal);
+                                NativeMethods.EmptyClipboard();
+                                var bytes = (clipboardToRestore.Length + 1) * 2;
+                                var hGlobal = NativeMethods.GlobalAlloc(NativeMethods.GMEM_MOVEABLE, (UIntPtr)bytes);
+                                if (hGlobal != IntPtr.Zero)
+                                {
+                                    var pGlobal = NativeMethods.GlobalLock(hGlobal);
+                                    if (pGlobal != IntPtr.Zero)
+                                    {
+                                        Marshal.Copy(clipboardToRestore.ToCharArray(), 0, pGlobal, clipboardToRestore.Length);
+                                        Marshal.WriteInt16(pGlobal, clipboardToRestore.Length * 2, 0);
+                                        NativeMethods.GlobalUnlock(hGlobal);
+                                    }
+                                    NativeMethods.SetClipboardData(NativeMethods.CF_UNICODETEXT, hGlobal);
+                                }
                             }
-                            NativeMethods.SetClipboardData(NativeMethods.CF_UNICODETEXT, hGlobal);
+                            finally
+                            {
+                                NativeMethods.CloseClipboard();
+                            }
                         }
                     }
-                }
-                finally
-                {
-                    NativeMethods.CloseClipboard();
-                }
+                    catch { /* Bỏ qua lỗi khôi phục clipboard */ }
+                });
             }
 
             DebugLog?.Invoke($"SendViaClipboard: bs={backspaceCount}, text='{text}'");
