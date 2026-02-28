@@ -13,7 +13,7 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>VietIME</AssemblyName>
-    <Version>1.0.8</Version>
+<Version>1.0.9</Version>
     <Company>Do Nam</Company>
     <Authors>Do Nam</Authors>
     <Copyright>Copyright (c) 2024-2026 Do Nam. All rights reserved.</Copyright>

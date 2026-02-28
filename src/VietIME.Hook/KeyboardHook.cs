@@ -41,6 +41,11 @@ public class KeyboardHook : IDisposable
     private readonly ConcurrentQueue<PendingKey> _pendingKeys = new();
     private record PendingKey(char Char, bool IsShift);
 
+    // Lock để tránh race condition với clipboard operations
+    private volatile bool _isClipboardBusy = false;
+    private CancellationTokenSource? _clipboardRestoreCts = null;
+    private readonly object _clipboardLock = new();
+
     public KeyboardHook()
     {
         _proc = HookCallback;
@@ -195,26 +200,68 @@ public class KeyboardHook : IDisposable
     }
 
     /// <summary>
-    /// Xử lý phím đã queue khi đang busy
-    /// Chạy trên background thread sau khi output gửi xong
+    /// Xử lý phím đã queue khi đang busy.
+    /// Batch tất cả pending keys → xử lý qua engine → gửi 1 lần duy nhất.
+    /// Giảm số lần SendInput/clipboard operations từ N xuống 1 → nhanh hơn trên RDP.
     /// </summary>
     private void ProcessPendingKeys()
     {
+        if (_engine == null)
+        {
+            while (_pendingKeys.TryDequeue(out _)) { }
+            return;
+        }
+
+        if (!_pendingKeys.TryPeek(out _)) return;
+
+        // Lưu trạng thái word đang hiển thị trên màn hình
+        // (= engine buffer sau lần gửi trước)
+        string screenWord = _engine.GetBuffer();
+        int screenWordLen = screenWord.Length;
+        bool isClipboard = IsClipboardApp();
+
         while (_pendingKeys.TryDequeue(out var pending))
         {
             if (_engine == null) break;
 
-            var result = _engine.ProcessKey(pending.Char, pending.IsShift);
+            // Non-letter (trừ bracket shortcuts) → word boundary
+            bool isWordBoundary = !char.IsLetter(pending.Char)
+                                  && pending.Char != '[' && pending.Char != ']';
 
-            if (result.Handled && result.OutputText != null)
+            if (isWordBoundary)
             {
-                SendAtomicReplace(result.BackspaceCount, result.OutputText);
-            }
-            else
-            {
-                // Engine không xử lý → gửi ký tự gốc
+                // Flush word hiện tại trước
+                string currentWord = _engine.GetBuffer();
+                if (currentWord != screenWord)
+                {
+                    if (isClipboard)
+                        SendViaClipboard(screenWordLen, currentWord);
+                    else
+                        SendAtomicReplace(screenWordLen, currentWord);
+                }
+
+                // Process non-letter (engine sẽ reset buffer)
+                _engine.ProcessKey(pending.Char, pending.IsShift);
                 SendCharDirectly(pending.Char);
+
+                // Reset tracking cho word mới
+                screenWord = _engine.GetBuffer();
+                screenWordLen = screenWord.Length;
+                continue;
             }
+
+            // Letter/bracket: engine tự cập nhật buffer nội bộ
+            _engine.ProcessKey(pending.Char, pending.IsShift);
+        }
+
+        // Flush word cuối cùng - chỉ gửi nếu có thay đổi
+        string finalWord = _engine.GetBuffer();
+        if (finalWord != screenWord)
+        {
+            if (isClipboard)
+                SendViaClipboard(screenWordLen, finalWord);
+            else
+                SendAtomicReplace(screenWordLen, finalWord);
         }
     }
 
@@ -230,13 +277,21 @@ public class KeyboardHook : IDisposable
     /// <summary>
     /// Gửi text qua clipboard: backspace → copy text → Ctrl+V → restore clipboard
     /// Dùng cho các app không hỗ trợ SendInput KEYEVENTF_UNICODE (Warp IDE, etc.)
+    /// FIX: Không restore clipboard để tránh race condition khi gõ nhanh
     /// </summary>
     private void SendViaClipboard(int backspaceCount, string text)
     {
         _isSendingInput = true;
         try
         {
-            // 1. Gửi backspace qua SendInput (giống SendAtomicReplace)
+            // Cancel pending restore nếu có (vì có input mới)
+            lock (_clipboardLock)
+            {
+                _clipboardRestoreCts?.Cancel();
+                _clipboardRestoreCts = null;
+            }
+
+            // 1. Gửi backspace qua SendInput
             if (backspaceCount > 0)
             {
                 var bsInputs = new NativeMethods.INPUT[backspaceCount * 2];
@@ -274,32 +329,38 @@ public class KeyboardHook : IDisposable
                     };
                 }
                 NativeMethods.SendInput((uint)bsInputs.Length, bsInputs, Marshal.SizeOf<NativeMethods.INPUT>());
-                // Giảm delay từ 10ms xuống 3ms - tối ưu cho Warp terminal
-                Thread.Sleep(3);
+                Thread.Sleep(2);
             }
 
             if (text.Length == 0) return;
 
-            // 2. Backup clipboard cũ
+            // 2. Backup clipboard cũ (chỉ backup 1 lần, không backup lại nếu đang có pending restore)
             string? oldClipboard = null;
-            if (NativeMethods.OpenClipboard(IntPtr.Zero))
+            lock (_clipboardLock)
             {
-                try
+                if (!_isClipboardBusy)
                 {
-                    var hData = NativeMethods.GetClipboardData(NativeMethods.CF_UNICODETEXT);
-                    if (hData != IntPtr.Zero)
+                    _isClipboardBusy = true;
+                    if (NativeMethods.OpenClipboard(IntPtr.Zero))
                     {
-                        var pData = NativeMethods.GlobalLock(hData);
-                        if (pData != IntPtr.Zero)
+                        try
                         {
-                            oldClipboard = Marshal.PtrToStringUni(pData);
-                            NativeMethods.GlobalUnlock(hData);
+                            var hData = NativeMethods.GetClipboardData(NativeMethods.CF_UNICODETEXT);
+                            if (hData != IntPtr.Zero)
+                            {
+                                var pData = NativeMethods.GlobalLock(hData);
+                                if (pData != IntPtr.Zero)
+                                {
+                                    oldClipboard = Marshal.PtrToStringUni(pData);
+                                    NativeMethods.GlobalUnlock(hData);
+                                }
+                            }
+                        }
+                        finally
+                        {
+                            NativeMethods.CloseClipboard();
                         }
                     }
-                }
-                finally
-                {
-                    NativeMethods.CloseClipboard();
                 }
             }
 
@@ -309,7 +370,7 @@ public class KeyboardHook : IDisposable
                 try
                 {
                     NativeMethods.EmptyClipboard();
-                    var bytes = (text.Length + 1) * 2; // UTF-16 + null terminator
+                    var bytes = (text.Length + 1) * 2;
                     var hGlobal = NativeMethods.GlobalAlloc(NativeMethods.GMEM_MOVEABLE, (UIntPtr)bytes);
                     if (hGlobal != IntPtr.Zero)
                     {
@@ -317,7 +378,7 @@ public class KeyboardHook : IDisposable
                         if (pGlobal != IntPtr.Zero)
                         {
                             Marshal.Copy(text.ToCharArray(), 0, pGlobal, text.Length);
-                            Marshal.WriteInt16(pGlobal, text.Length * 2, 0); // null terminator
+                            Marshal.WriteInt16(pGlobal, text.Length * 2, 0);
                             NativeMethods.GlobalUnlock(hGlobal);
                         }
                         NativeMethods.SetClipboardData(NativeMethods.CF_UNICODETEXT, hGlobal);
@@ -331,7 +392,6 @@ public class KeyboardHook : IDisposable
 
             // 4. Simulate Ctrl+V
             var pasteInputs = new NativeMethods.INPUT[4];
-            // Ctrl down
             pasteInputs[0] = new NativeMethods.INPUT
             {
                 type = NativeMethods.INPUT_KEYBOARD,
@@ -345,7 +405,6 @@ public class KeyboardHook : IDisposable
                     }
                 }
             };
-            // V down
             pasteInputs[1] = new NativeMethods.INPUT
             {
                 type = NativeMethods.INPUT_KEYBOARD,
@@ -359,7 +418,6 @@ public class KeyboardHook : IDisposable
                     }
                 }
             };
-            // V up
             pasteInputs[2] = new NativeMethods.INPUT
             {
                 type = NativeMethods.INPUT_KEYBOARD,
@@ -375,7 +433,6 @@ public class KeyboardHook : IDisposable
                     }
                 }
             };
-            // Ctrl up
             pasteInputs[3] = new NativeMethods.INPUT
             {
                 type = NativeMethods.INPUT_KEYBOARD,
@@ -393,12 +450,20 @@ public class KeyboardHook : IDisposable
             };
             NativeMethods.SendInput(4, pasteInputs, Marshal.SizeOf<NativeMethods.INPUT>());
 
-            // 5. Restore clipboard cũ - ASYNC để không block gõ phím (giảm từ 50ms xuống 0ms)
+            // 5. Restore clipboard sau delay dài hơn (500ms) và có thể cancel
             if (oldClipboard != null)
             {
-                var clipboardToRestore = oldClipboard;
-                Task.Delay(30).ContinueWith(_ =>
+                var cts = new CancellationTokenSource();
+                lock (_clipboardLock)
                 {
+                    _clipboardRestoreCts = cts;
+                }
+
+                var clipboardToRestore = oldClipboard;
+                Task.Delay(500, cts.Token).ContinueWith(_ =>
+                {
+                    if (cts.Token.IsCancellationRequested) return;
+
                     try
                     {
                         if (NativeMethods.OpenClipboard(IntPtr.Zero))
@@ -426,8 +491,25 @@ public class KeyboardHook : IDisposable
                             }
                         }
                     }
-                    catch { /* Bỏ qua lỗi khôi phục clipboard */ }
-                });
+                    catch { /* Bỏ qua lỗi */ }
+                    finally
+                    {
+                        lock (_clipboardLock)
+                        {
+                            _isClipboardBusy = false;
+                            if (_clipboardRestoreCts == cts)
+                                _clipboardRestoreCts = null;
+                        }
+                    }
+                }, TaskScheduler.Default);
+            }
+            else
+            {
+                // Không có clipboard cũ cần restore
+                lock (_clipboardLock)
+                {
+                    _isClipboardBusy = false;
+                }
             }
 
             DebugLog?.Invoke($"SendViaClipboard: bs={backspaceCount}, text='{text}'");
@@ -496,7 +578,8 @@ public class KeyboardHook : IDisposable
                 NativeMethods.SendInput((uint)bsInputs.Length, bsInputs, Marshal.SizeOf<NativeMethods.INPUT>());
 
                 // Delay nhỏ để app kịp xử lý backspace trước khi nhận unicode
-                Thread.Sleep(10);
+                // Giảm từ 10ms → 1ms cho nhanh hơn trên RDP
+                Thread.Sleep(1);
             }
 
             // 2. Gửi unicode text - batch riêng
