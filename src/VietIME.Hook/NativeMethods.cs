@@ -30,6 +30,7 @@ public static class NativeMethods
     public const int VK_TAB = 0x09;
     public const int VK_ESCAPE = 0x1B;
     public const int VK_V = 0x56;
+    public const int VK_Z = 0x5A;
     
     // Phím di chuyển con trỏ
     public const uint VK_LEFT = 0x25;

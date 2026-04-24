@@ -64,6 +64,7 @@ public static class MacNativeMethods
     public const ushort kVK_PageDown = 0x79;
     public const ushort kVK_ForwardDelete = 0x75;
     public const ushort kVK_ANSI_Grave = 0x32;    // ` (backtick/tilde key)
+    public const ushort kVK_ANSI_Z = 0x06;        // Z
 
     // CFRunLoop
     public static readonly IntPtr kCFRunLoopCommonModes;

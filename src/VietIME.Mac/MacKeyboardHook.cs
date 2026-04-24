@@ -38,7 +38,12 @@ public class MacKeyboardHook : IDisposable
     private DateTime _lastKeyTime = DateTime.MinValue;
     private DateTime _lastToggleTime = DateTime.MinValue;
     private const int TOGGLE_DEBOUNCE_MS = 300;
-    private bool _ctrlShiftWasPressed = false; // Track Ctrl+Shift combo cho toggle
+
+    // Warp-only mode: chỉ bật VietIME khi foreground app là Warp
+    private bool _warpOnlyMode = false;
+    private bool? _lastForegroundIsWarp = null;
+    private Timer? _warpWatcherTimer;
+    private const int WARP_POLL_INTERVAL_MS = 500;
 
     // Queue phím chờ xử lý khi đang busy
     private readonly ConcurrentQueue<PendingKey> _pendingKeys = new();
@@ -74,6 +79,46 @@ public class MacKeyboardHook : IDisposable
             _engine?.Reset();
             _engine = value;
         }
+    }
+
+    /// <summary>
+    /// Chỉ bật VietIME khi foreground app là Warp (bundle id dev.warp.Warp*).
+    /// Tương đương WarpOnlyMode trên Windows.
+    /// </summary>
+    public bool WarpOnlyMode
+    {
+        get => _warpOnlyMode;
+        set
+        {
+            if (_warpOnlyMode == value) return;
+            _warpOnlyMode = value;
+            if (_warpOnlyMode)
+            {
+                _lastForegroundIsWarp = null;
+                _warpWatcherTimer?.Dispose();
+                _warpWatcherTimer = new Timer(WarpWatcherTick, null, 0, WARP_POLL_INTERVAL_MS);
+            }
+            else
+            {
+                _warpWatcherTimer?.Dispose();
+                _warpWatcherTimer = null;
+            }
+        }
+    }
+
+    private void WarpWatcherTick(object? state)
+    {
+        if (!_warpOnlyMode) return;
+        try
+        {
+            bool isWarp = MacForegroundHelper.IsWarpForeground();
+            if (_lastForegroundIsWarp != isWarp)
+            {
+                _lastForegroundIsWarp = isWarp;
+                IsEnabled = isWarp;
+            }
+        }
+        catch { /* ignore */ }
     }
 
     /// <summary>
@@ -235,14 +280,9 @@ public class MacKeyboardHook : IDisposable
             if (markerValue == VIME_MARKER_VALUE)
                 return eventRef;
 
-            // Xử lý kCGEventFlagsChanged → detect Ctrl+Shift toggle
+            // kCGEventFlagsChanged: chỉ forward, không xử lý (hotkey mới dựa trên keydown Z)
             if (type == MacNativeMethods.kCGEventFlagsChanged)
-            {
-                ulong modFlags = MacNativeMethods.CGEventGetFlags(eventRef);
-                if (HandleCtrlShiftToggle(modFlags))
-                    return eventRef; // Không chặn modifier event
                 return eventRef;
-            }
 
             // Chỉ xử lý kCGEventKeyDown từ đây
             if (type != MacNativeMethods.kCGEventKeyDown)
@@ -478,67 +518,40 @@ public class MacKeyboardHook : IDisposable
     }
 
     /// <summary>
-    /// Xử lý Cmd+Shift qua kCGEventFlagsChanged → chỉ TẮT chế độ gõ tiếng Việt.
-    /// Cmd+Shift tắt VietIME để nhường cho bộ gõ khác (tương tự Ctrl+Shift trên Windows).
-    /// Dùng Cmd+` để bật lại.
-    /// </summary>
-    private bool HandleCtrlShiftToggle(ulong flags)
-    {
-        bool shiftPressed = MacNativeMethods.IsShiftPressed(flags);
-        bool cmdPressed = MacNativeMethods.IsCommandPressed(flags);
-        bool ctrlPressed = MacNativeMethods.IsControlPressed(flags);
-        bool optPressed = MacNativeMethods.IsOptionPressed(flags);
-
-        bool cmdShiftOnly = cmdPressed && shiftPressed && !ctrlPressed && !optPressed;
-
-        if (cmdShiftOnly && !_ctrlShiftWasPressed)
-        {
-            _ctrlShiftWasPressed = true;
-            if (_isEnabled)
-            {
-                var now = DateTime.UtcNow;
-                if ((now - _lastToggleTime).TotalMilliseconds >= TOGGLE_DEBOUNCE_MS)
-                {
-                    _lastToggleTime = now;
-                    IsEnabled = false;
-                    DebugLog?.Invoke("Cmd+Shift: Tắt chế độ gõ tiếng Việt");
-                }
-            }
-            return true;
-        }
-        else if (!cmdShiftOnly)
-        {
-            _ctrlShiftWasPressed = false;
-        }
-
-        return false;
-    }
-
-    /// <summary>
     /// Xử lý hotkey toggle cho kCGEventKeyDown.
-    /// Cmd+` để toggle bật/tắt VietIME.
+    /// Cmd + Opt + Z         → toggle bật/tắt
+    /// Cmd + Opt + Shift + Z → luôn TẮT VietIME (nhường bộ gõ khác)
     /// </summary>
     private bool HandleToggleHotkey(ushort keycode, ulong flags)
     {
-        // Cmd + ` (backtick) → toggle bật/tắt VietIME
-        if (keycode == MacNativeMethods.kVK_ANSI_Grave &&
-            MacNativeMethods.IsCommandPressed(flags) &&
-            !MacNativeMethods.IsShiftPressed(flags))
+        if (keycode != MacNativeMethods.kVK_ANSI_Z) return false;
+        if (!MacNativeMethods.IsCommandPressed(flags)) return false;
+        if (!MacNativeMethods.IsOptionPressed(flags)) return false;
+
+        if (MacNativeMethods.IsShiftPressed(flags))
         {
-            return TryToggle();
+            TryDisable();
+            return true; // chặn phím
         }
 
-        return false;
+        return TryToggle();
     }
 
     private bool TryToggle()
     {
         var now = DateTime.UtcNow;
-        if ((now - _lastToggleTime).TotalMilliseconds < TOGGLE_DEBOUNCE_MS)
-            return true;
+        if ((now - _lastToggleTime).TotalMilliseconds < TOGGLE_DEBOUNCE_MS) return true;
         _lastToggleTime = now;
         IsEnabled = !IsEnabled;
         return true;
+    }
+
+    private void TryDisable()
+    {
+        var now = DateTime.UtcNow;
+        if ((now - _lastToggleTime).TotalMilliseconds < TOGGLE_DEBOUNCE_MS) return;
+        _lastToggleTime = now;
+        if (_isEnabled) IsEnabled = false;
     }
 
 
@@ -587,6 +600,8 @@ public class MacKeyboardHook : IDisposable
     {
         if (!_disposed)
         {
+            _warpWatcherTimer?.Dispose();
+            _warpWatcherTimer = null;
             Uninstall();
             _disposed = true;
         }

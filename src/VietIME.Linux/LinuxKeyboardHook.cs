@@ -34,7 +34,6 @@ public class LinuxKeyboardHook : IDisposable
     private bool _rightCtrlDown;
     private bool _leftAltDown;
     private bool _rightAltDown;
-    private bool _ctrlShiftWasPressed;
 
     private const int BUFFER_TIMEOUT_MS = 2000;
     private DateTime _lastKeyTime = DateTime.MinValue;
@@ -43,6 +42,12 @@ public class LinuxKeyboardHook : IDisposable
 
     // Delay giữa các synthetic events (µs)
     private const int KEY_DELAY_US = 5000;
+
+    // Warp-only mode: chỉ bật VietIME khi foreground app là Warp
+    private bool _warpOnlyMode = false;
+    private bool? _lastForegroundIsWarp = null;
+    private System.Threading.Timer? _warpWatcherTimer;
+    private const int WARP_POLL_INTERVAL_MS = 500;
 
     public event EventHandler<bool>? EnabledChanged;
     public event EventHandler<string>? Error;
@@ -69,6 +74,72 @@ public class LinuxKeyboardHook : IDisposable
         {
             _engine?.Reset();
             _engine = value;
+        }
+    }
+
+    /// <summary>
+    /// Chỉ bật VietIME khi foreground app là Warp. Dựa vào xdotool để lấy window class.
+    /// Cần cài: sudo apt install xdotool
+    /// </summary>
+    public bool WarpOnlyMode
+    {
+        get => _warpOnlyMode;
+        set
+        {
+            if (_warpOnlyMode == value) return;
+            _warpOnlyMode = value;
+            if (_warpOnlyMode)
+            {
+                _lastForegroundIsWarp = null;
+                _warpWatcherTimer?.Dispose();
+                _warpWatcherTimer = new System.Threading.Timer(WarpWatcherTick, null, 0, WARP_POLL_INTERVAL_MS);
+            }
+            else
+            {
+                _warpWatcherTimer?.Dispose();
+                _warpWatcherTimer = null;
+            }
+        }
+    }
+
+    private void WarpWatcherTick(object? state)
+    {
+        if (!_warpOnlyMode) return;
+        try
+        {
+            bool isWarp = IsWarpForeground();
+            if (_lastForegroundIsWarp != isWarp)
+            {
+                _lastForegroundIsWarp = isWarp;
+                IsEnabled = isWarp;
+            }
+        }
+        catch { /* ignore */ }
+    }
+
+    private static bool IsWarpForeground()
+    {
+        try
+        {
+            var proc = new System.Diagnostics.Process
+            {
+                StartInfo = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "xdotool",
+                    Arguments = "getactivewindow getwindowclassname",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                }
+            };
+            proc.Start();
+            string output = proc.StandardOutput.ReadToEnd().Trim();
+            proc.WaitForExit(500);
+            return output.Contains("warp", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -348,11 +419,6 @@ public class LinuxKeyboardHook : IDisposable
         // Forward modifier key events trực tiếp
         if (IsModifierKey(ev.Code))
         {
-            // Kiểm tra Ctrl+` toggle trên key release
-            if (ev.Value == KEY_STATE_RELEASE)
-            {
-                HandleCtrlShiftToggle(ev.Code);
-            }
             WriteUinput(ref ev);
             return;
         }
@@ -364,17 +430,30 @@ public class LinuxKeyboardHook : IDisposable
             return;
         }
 
-        // Kiểm tra toggle hotkey: Ctrl+`
-        if (IsCtrlPressed && ev.Code == KEY_GRAVE)
+        // Kiểm tra toggle hotkey:
+        //   Ctrl+Alt+Z         → toggle bật/tắt
+        //   Ctrl+Alt+Shift+Z   → luôn TẮT VietIME
+        if (ev.Code == KEY_Z && IsCtrlPressed && IsAltPressed)
         {
             var now = DateTime.UtcNow;
             if ((now - _lastToggleTime).TotalMilliseconds > TOGGLE_DEBOUNCE_MS)
             {
-                IsEnabled = !IsEnabled;
                 _lastToggleTime = now;
-                DebugLog?.Invoke($"Toggle: {(_isEnabled ? "BẬT" : "TẮT")}");
+                if (IsShiftPressed)
+                {
+                    if (_isEnabled)
+                    {
+                        IsEnabled = false;
+                        DebugLog?.Invoke("Ctrl+Alt+Shift+Z: TẮT");
+                    }
+                }
+                else
+                {
+                    IsEnabled = !IsEnabled;
+                    DebugLog?.Invoke($"Ctrl+Alt+Z: {(_isEnabled ? "BẬT" : "TẮT")}");
+                }
             }
-            // Không forward phím toggle
+            // Không forward phím hotkey
             return;
         }
 
@@ -648,42 +727,6 @@ public class LinuxKeyboardHook : IDisposable
             or KEY_LEFTALT or KEY_RIGHTALT
             or KEY_CAPSLOCK;
 
-    /// <summary>
-    /// Xử lý Ctrl+Shift toggle (chỉ TẮT Vietnamese mode, giống macOS Cmd+Shift).
-    /// </summary>
-    private void HandleCtrlShiftToggle(ushort releasedCode)
-    {
-        if (releasedCode is KEY_LEFTSHIFT or KEY_RIGHTSHIFT)
-        {
-            if (IsCtrlPressed && _ctrlShiftWasPressed)
-            {
-                _ctrlShiftWasPressed = false;
-                if (_isEnabled)
-                {
-                    IsEnabled = false;
-                    DebugLog?.Invoke("Ctrl+Shift: TẮT Vietnamese mode");
-                }
-                return;
-            }
-        }
-
-        if (releasedCode is KEY_LEFTCTRL or KEY_RIGHTCTRL)
-        {
-            if (IsShiftPressed && _ctrlShiftWasPressed)
-            {
-                _ctrlShiftWasPressed = false;
-                if (_isEnabled)
-                {
-                    IsEnabled = false;
-                    DebugLog?.Invoke("Ctrl+Shift: TẮT Vietnamese mode");
-                }
-                return;
-            }
-        }
-
-        _ctrlShiftWasPressed = IsCtrlPressed && IsShiftPressed;
-    }
-
     private bool HandleSpecialKey(ushort code)
     {
         switch (code)
@@ -744,6 +787,8 @@ public class LinuxKeyboardHook : IDisposable
     {
         if (!_disposed)
         {
+            _warpWatcherTimer?.Dispose();
+            _warpWatcherTimer = null;
             Uninstall();
             _disposed = true;
         }

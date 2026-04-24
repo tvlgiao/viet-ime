@@ -25,6 +25,7 @@ public partial class MainWindow : Window
         if (_hook != null)
         {
             toggleEnabled.IsChecked = _hook.IsEnabled;
+            toggleWarpOnly.IsChecked = _hook.WarpOnlyMode;
             rbTelex.IsChecked = _hook.Engine?.Name == "Telex";
             rbVNI.IsChecked = _hook.Engine?.Name == "VNI";
             UpdateStatus();
@@ -49,6 +50,7 @@ public partial class MainWindow : Window
         if (_hook != null)
         {
             toggleEnabled.IsChecked = _hook.IsEnabled;
+            toggleWarpOnly.IsChecked = _hook.WarpOnlyMode;
             rbTelex.IsChecked = _hook.Engine?.Name == "Telex";
             rbVNI.IsChecked = _hook.Engine?.Name == "VNI";
             UpdateStatus();
@@ -91,6 +93,12 @@ public partial class MainWindow : Window
         {
             _hook.IsEnabled = toggleEnabled.IsChecked ?? false;
         }
+    }
+
+    private void ToggleWarpOnly_Changed(object? sender, RoutedEventArgs e)
+    {
+        if (!_initialized || _hook == null) return;
+        _hook.WarpOnlyMode = toggleWarpOnly.IsChecked ?? false;
     }
 
     private void InputMethod_Changed(object? sender, RoutedEventArgs e)
