@@ -23,6 +23,7 @@ public partial class MainWindow : Window
         if (_hook != null)
         {
             toggleEnabled.IsChecked = _hook.IsEnabled;
+            toggleWarpOnly.IsChecked = _hook.WarpOnlyMode;
             rbTelex.IsChecked = _hook.Engine?.Name == "Telex";
             rbVNI.IsChecked = _hook.Engine?.Name == "VNI";
             UpdateStatus();
@@ -49,6 +50,7 @@ public partial class MainWindow : Window
         if (_hook != null)
         {
             toggleEnabled.IsChecked = _hook.IsEnabled;
+            toggleWarpOnly.IsChecked = _hook.WarpOnlyMode;
             rbTelex.IsChecked = _hook.Engine?.Name == "Telex";
             rbVNI.IsChecked = _hook.Engine?.Name == "VNI";
             UpdateStatus();
@@ -64,9 +66,12 @@ public partial class MainWindow : Window
 
         var enabled = _hook.IsEnabled;
         var engineName = _hook.Engine?.Name ?? "Telex";
+        var warpOnly = _hook.WarpOnlyMode;
 
         toggleEnabled.IsChecked = enabled;
-        txtStatus.Text = enabled ? "Đang bật" : "Đã tắt";
+        txtStatus.Text = enabled
+            ? "Đang bật"
+            : (warpOnly ? "Chờ Warp" : "Đã tắt");
         txtEngine.Text = engineName;
 
         var successBrush = (SolidColorBrush)FindResource("SuccessBrush");
@@ -90,6 +95,13 @@ public partial class MainWindow : Window
         _app.NotificationsEnabled = toggleNotifications.IsChecked ?? false;
     }
 
+    private void ToggleWarpOnly_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!_initialized || _hook == null) return;
+        _hook.WarpOnlyMode = toggleWarpOnly.IsChecked ?? false;
+        _app.SaveSettings();
+    }
+
     private void InputMethod_Changed(object sender, RoutedEventArgs e)
     {
         if (!_initialized || _hook == null) return;
@@ -103,6 +115,7 @@ public partial class MainWindow : Window
             _hook.Engine = new VniEngine();
         }
 
+        _app.SaveSettings();
         UpdateStatus();
     }
 

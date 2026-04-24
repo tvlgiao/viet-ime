@@ -5,13 +5,15 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
         Title="VietIME"
-        Height="480" Width="420"
+        Height="640" Width="420"
+        MinHeight="400" MinWidth="380"
         WindowStartupLocation="CenterScreen"
-        ResizeMode="NoResize"
+        ResizeMode="CanResize"
         ShowInTaskbar="False"
         WindowStyle="SingleBorderWindow"
         Background="{StaticResource BackgroundBrush}">
 
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
     <StackPanel Margin="16">
 
         <!-- Status Card -->
@@ -101,7 +103,7 @@
             <StackPanel>
                 <TextBlock Text="PHÍM TẮT" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource TextDimBrush}" Margin="0,0,0,10"/>
 
-                <!-- Shortcut Ctrl+` -->
+                <!-- Shortcut Ctrl+Alt+Z -->
                 <Grid Margin="0,0,0,8">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
@@ -114,14 +116,18 @@
                         </Border>
                         <TextBlock Text=" + " Foreground="{StaticResource TextDimBrush}" VerticalAlignment="Center" FontSize="11"/>
                         <Border Background="{StaticResource SurfaceLightBrush}" CornerRadius="6" Padding="8,3">
-                            <TextBlock Text="`" FontSize="11" Foreground="{StaticResource TextMutedBrush}" FontFamily="Consolas"/>
+                            <TextBlock Text="Alt" FontSize="11" Foreground="{StaticResource TextMutedBrush}"/>
+                        </Border>
+                        <TextBlock Text=" + " Foreground="{StaticResource TextDimBrush}" VerticalAlignment="Center" FontSize="11"/>
+                        <Border Background="{StaticResource SurfaceLightBrush}" CornerRadius="6" Padding="8,3">
+                            <TextBlock Text="Z" FontSize="11" Foreground="{StaticResource TextMutedBrush}" FontFamily="Consolas"/>
                         </Border>
                     </StackPanel>
                 </Grid>
 
                 <Border Height="1" Background="{StaticResource SurfaceLightBrush}" Margin="0,4,0,8"/>
 
-                <!-- Shortcut Ctrl+Shift -->
+                <!-- Shortcut Ctrl+Alt+Shift+Z -->
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
@@ -134,11 +140,37 @@
                         </Border>
                         <TextBlock Text=" + " Foreground="{StaticResource TextDimBrush}" VerticalAlignment="Center" FontSize="11"/>
                         <Border Background="{StaticResource SurfaceLightBrush}" CornerRadius="6" Padding="8,3">
+                            <TextBlock Text="Alt" FontSize="11" Foreground="{StaticResource TextMutedBrush}"/>
+                        </Border>
+                        <TextBlock Text=" + " Foreground="{StaticResource TextDimBrush}" VerticalAlignment="Center" FontSize="11"/>
+                        <Border Background="{StaticResource SurfaceLightBrush}" CornerRadius="6" Padding="8,3">
                             <TextBlock Text="Shift" FontSize="11" Foreground="{StaticResource TextMutedBrush}"/>
+                        </Border>
+                        <TextBlock Text=" + " Foreground="{StaticResource TextDimBrush}" VerticalAlignment="Center" FontSize="11"/>
+                        <Border Background="{StaticResource SurfaceLightBrush}" CornerRadius="6" Padding="8,3">
+                            <TextBlock Text="Z" FontSize="11" Foreground="{StaticResource TextMutedBrush}" FontFamily="Consolas"/>
                         </Border>
                     </StackPanel>
                 </Grid>
             </StackPanel>
+        </Border>
+
+        <!-- Warp-only Mode Card -->
+        <Border Background="{StaticResource SurfaceBrush}" CornerRadius="12" Padding="18" Margin="0,0,0,10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <ToggleButton x:Name="toggleWarpOnly" Grid.Column="0"
+                              Style="{StaticResource ToggleSwitch}"
+                              IsChecked="False"
+                              Checked="ToggleWarpOnly_Changed" Unchecked="ToggleWarpOnly_Changed"/>
+                <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
+                    <TextBlock Text="Chỉ bật trong Warp" FontSize="13"/>
+                    <TextBlock Text="Khi active Warp: tự bật. App khác: tự tắt." FontSize="10" Foreground="{StaticResource TextDimBrush}" Margin="0,2,0,0"/>
+                </StackPanel>
+            </Grid>
         </Border>
 
         <!-- Footer -->
@@ -160,4 +192,5 @@
         </Grid>
 
     </StackPanel>
+    </ScrollViewer>
 </Window>

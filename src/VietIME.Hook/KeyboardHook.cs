@@ -37,6 +37,17 @@ public class KeyboardHook : IDisposable
     private DateTime _lastToggleTime = DateTime.MinValue;
     private const int TOGGLE_DEBOUNCE_MS = 300;
 
+    // Warp-only mode: chỉ bật VietIME khi foreground app là Warp.
+    // Khi bật, polling thread tự set IsEnabled theo foreground app.
+    private bool _warpOnlyMode = false;
+    private bool? _lastForegroundIsWarp = null;
+    private Timer? _warpWatcherTimer;
+    private const int WARP_POLL_INTERVAL_MS = 500;
+    private static readonly HashSet<string> _warpProcessNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "warp"
+    };
+
     // Queue phím chờ xử lý khi đang busy
     private readonly ConcurrentQueue<PendingKey> _pendingKeys = new();
     private record PendingKey(char Char, bool IsShift);
@@ -77,6 +88,75 @@ public class KeyboardHook : IDisposable
             _engine?.Reset();
             _engine = value;
         }
+    }
+
+    /// <summary>
+    /// Chỉ bật VietIME khi foreground app là Warp.
+    /// Khi bật, polling timer tự update IsEnabled theo foreground:
+    ///   foreground = Warp → IsEnabled = true
+    ///   foreground ≠ Warp → IsEnabled = false
+    /// User vẫn toggle được qua hotkey/UI trong khi ở 1 app; khi chuyển app khác thì state reset theo rule.
+    /// </summary>
+    public bool WarpOnlyMode
+    {
+        get => _warpOnlyMode;
+        set
+        {
+            if (_warpOnlyMode == value) return;
+            _warpOnlyMode = value;
+            if (_warpOnlyMode)
+            {
+                _lastForegroundIsWarp = null; // Force update ở tick đầu
+                StartWarpWatcher();
+            }
+            else
+            {
+                StopWarpWatcher();
+            }
+        }
+    }
+
+    private void StartWarpWatcher()
+    {
+        _warpWatcherTimer?.Dispose();
+        _warpWatcherTimer = new Timer(WarpWatcherTick, null, 0, WARP_POLL_INTERVAL_MS);
+    }
+
+    private void StopWarpWatcher()
+    {
+        _warpWatcherTimer?.Dispose();
+        _warpWatcherTimer = null;
+    }
+
+    private void WarpWatcherTick(object? state)
+    {
+        if (!_warpOnlyMode) return;
+        try
+        {
+            bool isWarp = IsWarpForeground();
+            if (_lastForegroundIsWarp != isWarp)
+            {
+                _lastForegroundIsWarp = isWarp;
+                IsEnabled = isWarp;
+            }
+        }
+        catch { /* ignore */ }
+    }
+
+    /// <summary>
+    /// Force sync check Warp foreground ngay lập tức — dùng khi cần UI hiển thị đúng state
+    /// mà không phải chờ 500ms tick tiếp theo.
+    /// </summary>
+    public void ForceWarpCheck()
+    {
+        if (!_warpOnlyMode) return;
+        WarpWatcherTick(null);
+    }
+
+    private static bool IsWarpForeground()
+    {
+        var name = NativeMethods.GetForegroundProcessName();
+        return name != null && _warpProcessNames.Contains(name);
     }
 
     public void Install()
@@ -684,21 +764,18 @@ public class KeyboardHook : IDisposable
 
     private bool HandleToggleHotkey(uint vkCode)
     {
-        // Ctrl + ` (backtick/tilde key) - toggle bật/tắt
-        if (vkCode == 0xC0 && NativeMethods.IsCtrlPressed() && !NativeMethods.IsShiftPressed())
-            return TryToggle();
+        if (vkCode != NativeMethods.VK_Z) return false;
+        if (!NativeMethods.IsCtrlPressed() || !NativeMethods.IsAltPressed()) return false;
 
-        // Ctrl + Shift (bất kỳ phím Shift nào) - luôn TẮT VietIME
-        // Dùng khi Unikey chạy song song: người dùng ấn Ctrl+Shift để chuyển layout → tắt VietIME
-        if ((vkCode == 0xA0 || vkCode == 0xA1) && NativeMethods.IsCtrlPressed()) // VK_LSHIFT hoặc VK_RSHIFT
-            return TryDisable();
-        if (vkCode == 0xA2 || vkCode == 0xA3) // VK_LCONTROL hoặc VK_RCONTROL
+        // Ctrl + Alt + Shift + Z → luôn TẮT VietIME (nhường Unikey hoặc để gõ tiếng Anh)
+        if (NativeMethods.IsShiftPressed())
         {
-            if (NativeMethods.IsShiftPressed())
-                return TryDisable();
+            TryDisable();
+            return true; // Chặn phím để không gửi Z ra app
         }
 
-        return false;
+        // Ctrl + Alt + Z → toggle bật/tắt VietIME
+        return TryToggle();
     }
 
     private bool TryToggle()
@@ -711,17 +788,12 @@ public class KeyboardHook : IDisposable
         return true;
     }
 
-    private bool TryDisable()
+    private void TryDisable()
     {
         var now = DateTime.UtcNow;
-        if ((now - _lastToggleTime).TotalMilliseconds < TOGGLE_DEBOUNCE_MS)
-            return false; // Không chặn phím, để Ctrl+Shift đi qua cho Unikey
+        if ((now - _lastToggleTime).TotalMilliseconds < TOGGLE_DEBOUNCE_MS) return;
         _lastToggleTime = now;
-        if (_isEnabled)
-        {
-            IsEnabled = false;
-        }
-        return false; // Không chặn phím - để Ctrl+Shift đi qua cho hệ thống/Unikey xử lý
+        if (_isEnabled) IsEnabled = false;
     }
 
     private bool HandleSpecialKey(uint vkCode)
@@ -754,6 +826,6 @@ public class KeyboardHook : IDisposable
     }
 
     public void Dispose() { Dispose(true); GC.SuppressFinalize(this); }
-    protected virtual void Dispose(bool disposing) { if (!_disposed) { Uninstall(); _disposed = true; } }
+    protected virtual void Dispose(bool disposing) { if (!_disposed) { StopWarpWatcher(); Uninstall(); _disposed = true; } }
     ~KeyboardHook() { Dispose(false); }
 }

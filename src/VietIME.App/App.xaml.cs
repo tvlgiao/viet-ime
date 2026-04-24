@@ -2,10 +2,9 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.Windows;
-using System.Windows.Interop;
-using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using VietIME.Core.Engines;
+using VietIME.Core.Services;
 using VietIME.Hook;
 
 namespace VietIME.App;
@@ -16,21 +15,56 @@ public partial class App : System.Windows.Application
     private System.Windows.Forms.NotifyIcon? _trayIcon;
     private MainWindow? _settingsWindow;
     private DispatcherTimer? _layoutCheckTimer;
-    private Window? _taskbarWindow;
     private bool _isShuttingDown;
+    private AppSettings _settings = new();
 
-    public bool NotificationsEnabled { get; set; } = false;
+    public bool NotificationsEnabled
+    {
+        get => _settings.NotificationsEnabled;
+        set
+        {
+            if (_settings.NotificationsEnabled == value) return;
+            _settings.NotificationsEnabled = value;
+            SaveSettings();
+        }
+    }
+
+    public void SaveSettings()
+    {
+        if (_hook != null)
+        {
+            _settings.IsEnabled = _hook.IsEnabled;
+            _settings.EngineName = _hook.Engine?.Name ?? "Telex";
+            _settings.WarpOnlyMode = _hook.WarpOnlyMode;
+        }
+        SettingsService.Save(_settings);
+    }
 
     private void Application_Startup(object sender, StartupEventArgs e)
     {
+        _settings = SettingsService.Load();
+
         _hook = new KeyboardHook();
-        _hook.Engine = new TelexEngine();
+        _hook.Engine = _settings.EngineName == "VNI" ? new VniEngine() : new TelexEngine();
+
+        if (_settings.WarpOnlyMode)
+        {
+            // Khi WarpOnly bật, watcher tự quyết định IsEnabled theo foreground app.
+            // KHÔNG load IsEnabled từ settings (tránh race: saved=true khi đang ở Warp,
+            // mở lại ở app khác sẽ bị kẹt bật).
+            _hook.IsEnabled = false;
+            _hook.WarpOnlyMode = true;
+        }
+        else
+        {
+            _hook.IsEnabled = _settings.IsEnabled;
+        }
+
         _hook.EnabledChanged += Hook_EnabledChanged;
         _hook.Error += Hook_Error;
         _hook.Install();
 
         CreateTrayIcon();
-        CreateTaskbarWindow();
 
         // Timer kiem tra keyboard layout moi 1 giay
         // Neu Unikey bat tieng Viet (layout 0x042A) -> tu dong tat VietIME
@@ -48,7 +82,6 @@ public partial class App : System.Windows.Application
         _layoutCheckTimer?.Stop();
         _hook?.Dispose();
         _trayIcon?.Dispose();
-        _taskbarWindow?.Close();
     }
 
     /// <summary>
@@ -221,8 +254,6 @@ public partial class App : System.Windows.Application
         _trayIcon.Text = enabled
             ? $"VietIME — Bật ({engineName})"
             : "VietIME — Tắt";
-
-        UpdateTaskbarWindow();
     }
 
     private void ToggleIME()
@@ -243,27 +274,39 @@ public partial class App : System.Windows.Application
             _ => new TelexEngine()
         };
 
+        SaveSettings();
         UpdateTrayIcon();
         ShowBalloonTipIfEnabled("VietIME", $"Đã chuyển sang {engineName}");
     }
 
     private void ShowSettings()
     {
+        // Force watcher tick để UI hiển thị đúng state (tránh stale "Đang bật" khi
+        // foreground không phải Warp nhưng tick 500ms chưa update kịp).
+        _hook?.ForceWarpCheck();
+
         if (_settingsWindow == null)
         {
             _settingsWindow = new MainWindow(_hook);
         }
 
-        if (_settingsWindow.IsVisible)
-        {
-            _settingsWindow.Activate();
-        }
-        else
+        if (!_settingsWindow.IsVisible)
         {
             _settingsWindow.RefreshState();
             _settingsWindow.Show();
-            _settingsWindow.Activate();
         }
+
+        _settingsWindow.WindowState = WindowState.Normal;
+
+        // Force re-center on primary screen work area (tránh window kẹt off-screen)
+        var workArea = System.Windows.SystemParameters.WorkArea;
+        _settingsWindow.Left = workArea.Left + (workArea.Width - _settingsWindow.Width) / 2;
+        _settingsWindow.Top = workArea.Top + (workArea.Height - _settingsWindow.Height) / 2;
+
+        _settingsWindow.Activate();
+        _settingsWindow.Topmost = true;
+        _settingsWindow.Topmost = false;
+        _settingsWindow.Focus();
     }
 
     private void ShowBalloonTipIfEnabled(string title, string text)
@@ -276,6 +319,7 @@ public partial class App : System.Windows.Application
     {
         Dispatcher.Invoke(() =>
         {
+            SaveSettings();
             UpdateTrayIcon();
             ShowBalloonTipIfEnabled("VietIME", enabled ? "Đã bật" : "Đã tắt");
         });
@@ -289,87 +333,6 @@ public partial class App : System.Windows.Application
         });
     }
 
-    #region Taskbar Toggle Window
-
-    /// <summary>
-    /// Tạo cửa sổ ẩn hiển thị trên taskbar để user pin và click toggle nhanh.
-    /// Khi click icon trên taskbar, IME sẽ bật/tắt và icon đổi màu.
-    /// </summary>
-    private void CreateTaskbarWindow()
-    {
-        _taskbarWindow = new Window
-        {
-            Title = GetTaskbarTitle(),
-            ShowInTaskbar = true,
-            ShowActivated = false,
-            WindowState = WindowState.Minimized,
-            Width = 1,
-            Height = 1,
-            Left = -32000,
-            Top = -32000,
-            ResizeMode = ResizeMode.NoResize,
-        };
-
-        _taskbarWindow.Icon = CreateWpfIcon();
-
-        // Click taskbar icon -> Windows restore window -> toggle IME -> minimize lại
-        _taskbarWindow.StateChanged += (s, e) =>
-        {
-            if (_taskbarWindow.WindowState != WindowState.Minimized)
-            {
-                ToggleIME();
-                // Minimize lại ngay để chỉ hiển thị icon trên taskbar
-                _taskbarWindow.WindowState = WindowState.Minimized;
-            }
-        };
-
-        // Không cho đóng cửa sổ này (trừ khi app thoát)
-        _taskbarWindow.Closing += (s, e) =>
-        {
-            if (!_isShuttingDown)
-                e.Cancel = true;
-        };
-
-        _taskbarWindow.Show();
-    }
-
-    /// <summary>
-    /// Cập nhật icon và title của taskbar window theo trạng thái IME.
-    /// Icon đỏ = bật, icon xám = tắt.
-    /// </summary>
-    private void UpdateTaskbarWindow()
-    {
-        if (_taskbarWindow == null) return;
-
-        _taskbarWindow.Title = GetTaskbarTitle();
-        _taskbarWindow.Icon = CreateWpfIcon();
-    }
-
-    private string GetTaskbarTitle()
-    {
-        var enabled = _hook?.IsEnabled ?? true;
-        var engineName = _hook?.Engine?.Name ?? "Telex";
-        return enabled
-            ? $"VietIME — Bật ({engineName})"
-            : "VietIME — Tắt";
-    }
-
-    /// <summary>
-    /// Tạo WPF ImageSource từ GDI Icon cho taskbar window.
-    /// </summary>
-    private System.Windows.Media.ImageSource CreateWpfIcon()
-    {
-        using var icon = CreateIcon();
-        var hIcon = icon.Handle;
-        var bitmapSource = Imaging.CreateBitmapSourceFromHIcon(
-            hIcon,
-            Int32Rect.Empty,
-            BitmapSizeOptions.FromEmptyOptions());
-        bitmapSource.Freeze();
-        return bitmapSource;
-    }
-
-    #endregion
 }
 
 internal class DarkMenuRenderer : System.Windows.Forms.ToolStripProfessionalRenderer
